@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include "NvInfer.h"
 #include "decode.h"
+#include "verbosity.h"
 
 using namespace nvinfer1;
 
@@ -108,25 +109,24 @@ static bool cmp(const decodeplugin::Detection& a, const decodeplugin::Detection&
 }
 
 static inline void nms(std::vector<decodeplugin::Detection>& res, float *output, float nms_thresh = 0.4) {
-    std::cout << "NMS called with threshold: " << nms_thresh << std::endl;
-    std::cout << "Number of initial detections: " << output[0] << std::endl;
+    LOG(DEBUG, "NMS called with threshold: %f\n", nms_thresh);
+    LOG(DEBUG, "Number of initial detections: %f\n", output[0]);
     
     std::vector<decodeplugin::Detection> dets;
     for (int i = 0; i < output[0]; i++) {
         if (output[15 * i + 1 + 4] <= 0.1) continue;
-        std::cout << "Detection " << i << " passed confidence threshold. Conf: " 
-                 << output[15 * i + 1 + 4] << std::endl;
+        LOG(DEBUG, "Detection %d passed confidence threshold. Conf: %f\n",
+            i, output[15 * i + 1 + 4]);
         decodeplugin::Detection det;
         memcpy(&det, &output[15 * i + 1], sizeof(decodeplugin::Detection));
         dets.push_back(det);
     }
     
-    std::cout << "After initial filtering: " << dets.size() << " detections" << std::endl;
+    LOG(INFO, "Found %zu detections after filtering\n", dets.size());
     std::sort(dets.begin(), dets.end(), cmp);
     for (size_t m = 0; m < dets.size(); ++m) {
         auto& item = dets[m];
         res.push_back(item);
-        //std::cout << item.class_confidence << " bbox " << item.bbox[0] << ", " << item.bbox[1] << ", " << item.bbox[2] << ", " << item.bbox[3] << std::endl;
         for (size_t n = m + 1; n < dets.size(); ++n) {
             if (iou(item.bbox, dets[n].bbox) > nms_thresh) {
                 dets.erase(dets.begin()+n);
@@ -134,6 +134,7 @@ static inline void nms(std::vector<decodeplugin::Detection>& res, float *output,
             }
         }
     }
+    LOG(INFO, "Final detections after NMS: %zu\n", res.size());
 }
 
 // Load weights from files

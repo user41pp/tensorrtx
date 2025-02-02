@@ -8,6 +8,8 @@
 #include "logging.h"
 #include "common.hpp"
 #include "calibrator.h"
+#include <string>
+#include "verbosity.h"
 
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
@@ -294,17 +296,33 @@ void doInference(IExecutionContext& context, float* input, float* output, int ba
 }
 
 int main(int argc, char** argv) {
-    // Add debug prints here at the start of main
-    std::cout << "OUTPUT_SIZE: " << OUTPUT_SIZE << std::endl;
-    std::cout << "INPUT_H: " << INPUT_H << std::endl;
-    std::cout << "INPUT_W: " << INPUT_W << std::endl;
-    
-    if (argc != 2) {
+    // Update argument parsing
+    if (argc < 2 || argc > 3) {
         std::cerr << "arguments not right!" << std::endl;
-        std::cerr << "./retina_r50 -s   // serialize model to plan file" << std::endl;
-        std::cerr << "./retina_r50 -d   // deserialize plan file and run inference" << std::endl;
+        std::cerr << "./retina_r50 -s [-v LEVEL]  // serialize model to plan file" << std::endl;
+        std::cerr << "./retina_r50 -d [-v LEVEL]  // deserialize plan file and run inference" << std::endl;
+        std::cerr << "LEVEL can be 0(SILENT), 1(ERROR), 2(WARNING), 3(INFO), 4(DEBUG), 5(TRACE)" << std::endl;
         return -1;
     }
+
+    // Parse verbosity level if provided
+    if (argc == 3) {
+        if (std::string(argv[2]) == "-v") {
+            std::cerr << "Missing verbosity level argument" << std::endl;
+            return -1;
+        }
+        int verbosity = std::stoi(argv[2]);
+        if (verbosity < SILENT || verbosity > TRACE) {
+            std::cerr << "Invalid verbosity level. Must be between 0-5" << std::endl;
+            return -1;
+        }
+        g_verbosity = static_cast<VerbosityLevel>(verbosity);
+    }
+
+    // Replace existing debug prints with LOG macro
+    LOG(DEBUG, "OUTPUT_SIZE: %d\n", OUTPUT_SIZE);
+    LOG(DEBUG, "INPUT_H: %d\n", INPUT_H);
+    LOG(DEBUG, "INPUT_W: %d\n", INPUT_W);
 
     cudaSetDevice(DEVICE);
     // create a model using the API directly and serialize it to a stream
@@ -323,6 +341,7 @@ int main(int argc, char** argv) {
         }
         p.write(reinterpret_cast<const char*>(modelStream->data()), modelStream->size());
         modelStream->destroy();
+        LOG(INFO, "Model serialized successfully\n");
         return 1;
     } else if (std::string(argv[1]) == "-d") {
         std::ifstream file("retina_r50.engine", std::ios::binary);
@@ -349,19 +368,22 @@ int main(int argc, char** argv) {
     //cv::imwrite("preprocessed.jpg", pr_img);
 
     // Add after preprocessing
-    std::cout << "Preprocessed image size: " << pr_img.size() << std::endl;
-    std::cout << "First few preprocessed pixels: ";
-    for (int i = 0; i < 5; i++) {
-        std::cout << "(" << (int)pr_img.at<cv::Vec3b>(0,i)[0] << "," 
-                  << (int)pr_img.at<cv::Vec3b>(0,i)[1] << "," 
-                  << (int)pr_img.at<cv::Vec3b>(0,i)[2] << ") ";
+    LOG(DEBUG, "Preprocessed image size: %dx%d\n", pr_img.cols, pr_img.rows);
+    LOG(TRACE, "First few preprocessed pixels: ");
+    if (g_verbosity >= TRACE) {
+        for (int i = 0; i < 5; i++) {
+            printf("(%d,%d,%d) ", 
+                (int)pr_img.at<cv::Vec3b>(0,i)[0],
+                (int)pr_img.at<cv::Vec3b>(0,i)[1],
+                (int)pr_img.at<cv::Vec3b>(0,i)[2]);
+        }
+        printf("\n");
     }
-    std::cout << std::endl;
 
     // Add this to verify the input image
-    std::cout << "Input image size: " << img.size() << std::endl;
+    LOG(INFO, "Input image size: %dx%d\n", img.cols, img.rows);
     if (img.empty()) {
-        std::cerr << "Failed to read input image!" << std::endl;
+        LOG(ERROR, "Failed to read input image!\n");
         return -1;
     }
 
@@ -370,20 +392,20 @@ int main(int argc, char** argv) {
         float *p_data = &data[b * 3 * INPUT_H * INPUT_W];
         
         // Print a few original pixel values before normalization
-        std::cout << "Original pixel values (first 3): " << std::endl;
+        LOG(DEBUG, "Original pixel values (first 3): \n");
         for (int i = 0; i < 3; i++) {
-            std::cout << "Pixel " << i << ": (" 
-                     << (int)pr_img.at<cv::Vec3b>(i)[0] << "," 
-                     << (int)pr_img.at<cv::Vec3b>(i)[1] << "," 
-                     << (int)pr_img.at<cv::Vec3b>(i)[2] << ")" << std::endl;
+            LOG(DEBUG, "Pixel %d: (%d,%d,%d)\n", i, 
+                     (int)pr_img.at<cv::Vec3b>(i)[0],
+                     (int)pr_img.at<cv::Vec3b>(i)[1],
+                     (int)pr_img.at<cv::Vec3b>(i)[2]);
         }
 
         // Debug the normalization calculation
-        std::cout << "Normalized values for first pixel:" << std::endl;
+        LOG(DEBUG, "Normalized values for first pixel:\n");
         int i = 0;
-        std::cout << "R: " << pr_img.at<cv::Vec3b>(i)[0] << " -> " << (pr_img.at<cv::Vec3b>(i)[0] - 104.0) << std::endl;
-        std::cout << "G: " << pr_img.at<cv::Vec3b>(i)[1] << " -> " << (pr_img.at<cv::Vec3b>(i)[1] - 117.0) << std::endl;
-        std::cout << "B: " << pr_img.at<cv::Vec3b>(i)[2] << " -> " << (pr_img.at<cv::Vec3b>(i)[2] - 123.0) << std::endl;
+        LOG(DEBUG, "R: %d -> %f\n", pr_img.at<cv::Vec3b>(i)[0], (pr_img.at<cv::Vec3b>(i)[0] - 104.0));
+        LOG(DEBUG, "G: %d -> %f\n", pr_img.at<cv::Vec3b>(i)[1], (pr_img.at<cv::Vec3b>(i)[1] - 117.0));
+        LOG(DEBUG, "B: %d -> %f\n", pr_img.at<cv::Vec3b>(i)[2], (pr_img.at<cv::Vec3b>(i)[2] - 123.0));
 
         for (int i = 0; i < INPUT_H * INPUT_W; i++) {
             p_data[i] = pr_img.at<cv::Vec3b>(i)[0] - 104.0;
@@ -393,11 +415,11 @@ int main(int argc, char** argv) {
     }
 
     // Add after preparing input data
-    std::cout << "First few network input values: ";
+    LOG(DEBUG, "First few network input values: ");
     for (int i = 0; i < 5; i++) {
-        std::cout << data[i] << " ";
+        LOG(DEBUG, "%f ", data[i]);
     }
-    std::cout << std::endl;
+    LOG(DEBUG, "\n");
 
     IRuntime* runtime = createInferRuntime(gLogger);
     assert(runtime != nullptr);
@@ -413,32 +435,33 @@ int main(int argc, char** argv) {
         auto start = std::chrono::system_clock::now();
         doInference(*context, data, prob, BATCH_SIZE);
         auto end = std::chrono::system_clock::now();
-        std::cout << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << "us" << std::endl;
+        LOG(INFO, "Inference time: %lld us\n", 
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
     }
 
     // Add after inference
-    std::cout << "First few raw output values: ";
+    LOG(DEBUG, "First few raw output values: ");
     for (int i = 0; i < 10; i++) {
-        std::cout << prob[i] << " ";
+        LOG(DEBUG, "%f ", prob[i]);
     }
-    std::cout << std::endl;
+    LOG(DEBUG, "\n");
 
     for (int b = 0; b < BATCH_SIZE; b++) {
         std::vector<decodeplugin::Detection> res;
-        std::cout << "\nBefore NMS - first few detections:" << std::endl;
+        LOG(INFO, "\nBefore NMS - first few detections:\n");
         for (int i = 0; i < 5; i++) {
             float conf = prob[b * OUTPUT_SIZE + i*15 + 5];
-            std::cout << "Detection " << i << " confidence: " << conf 
-                     << " bbox: " << prob[b * OUTPUT_SIZE + i*15 + 1] << " "
-                     << prob[b * OUTPUT_SIZE + i*15 + 2] << " "
-                     << prob[b * OUTPUT_SIZE + i*15 + 3] << " "
-                     << prob[b * OUTPUT_SIZE + i*15 + 4] << std::endl;
+            LOG(INFO, "Detection %d confidence: %f bbox: %f %f %f %f\n", i, conf, 
+                     prob[b * OUTPUT_SIZE + i*15 + 1],
+                     prob[b * OUTPUT_SIZE + i*15 + 2],
+                     prob[b * OUTPUT_SIZE + i*15 + 3],
+                     prob[b * OUTPUT_SIZE + i*15 + 4]);
         }
         
         nms(res, &prob[b * OUTPUT_SIZE], IOU_THRESH);
-        std::cout << "number of detections -> " << prob[b * OUTPUT_SIZE] << std::endl;
-        std::cout << " -> " << prob[b * OUTPUT_SIZE + 10] << std::endl;
-        std::cout << "after nms -> " << res.size() << std::endl;
+        LOG(INFO, "number of detections -> %f\n", prob[b * OUTPUT_SIZE]);
+        LOG(INFO, " -> %f\n", prob[b * OUTPUT_SIZE + 10]);
+        LOG(INFO, "after nms -> %zu\n", res.size());
         cv::Mat tmp = img.clone();
         for (size_t j = 0; j < res.size(); j++) {
             if (res[j].class_confidence < CONF_THRESH) continue;

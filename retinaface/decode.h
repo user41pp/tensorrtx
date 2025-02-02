@@ -8,6 +8,28 @@
 
 namespace decodeplugin
 {
+    /**
+     * @brief Structure representing a single face detection result
+     * 
+     * This structure contains the bounding box coordinates, confidence score,
+     * and facial landmark coordinates for a detected face.
+     * 
+     * @field bbox Array of 4 floats representing the bounding box:
+     *            - bbox[0] (x1): Left coordinate
+     *            - bbox[1] (y1): Top coordinate
+     *            - bbox[2] (x2): Right coordinate
+     *            - bbox[3] (y2): Bottom coordinate
+     * 
+     * @field class_confidence Float value between 0-1 representing the confidence
+     *                        that this detection is a face
+     * 
+     * @field landmark Array of 10 floats representing 5 facial keypoints:
+     *                - landmark[0,1]: x,y coordinates of 1st facial keypoint
+     *                - landmark[2,3]: x,y coordinates of 2nd facial keypoint
+     *                - landmark[4,5]: x,y coordinates of 3rd facial keypoint
+     *                - landmark[6,7]: x,y coordinates of 4th facial keypoint
+     *                - landmark[8,9]: x,y coordinates of 5th facial keypoint
+     */
     struct alignas(float) Detection{
         float bbox[4];  //x1 y1 x2 y2
         float class_confidence;
