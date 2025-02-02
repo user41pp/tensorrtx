@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.10)
 
 project(retinaface)
 
@@ -21,6 +21,10 @@ else()
 endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Ofast -Wfatal-errors -D_MWAITXINTRIN_H_INCLUDED")
+
+# Set CUDA architecture flags explicitly
+set(CMAKE_CUDA_ARCHITECTURES 86)  # For RTX 3090
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -gencode arch=compute_86,code=sm_86)
 
 cuda_add_library(decodeplugin SHARED ${PROJECT_SOURCE_DIR}/decode.cu)
 target_link_libraries(decodeplugin nvinfer cudart)
