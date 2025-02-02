@@ -108,13 +108,20 @@ static bool cmp(const decodeplugin::Detection& a, const decodeplugin::Detection&
 }
 
 static inline void nms(std::vector<decodeplugin::Detection>& res, float *output, float nms_thresh = 0.4) {
+    std::cout << "NMS called with threshold: " << nms_thresh << std::endl;
+    std::cout << "Number of initial detections: " << output[0] << std::endl;
+    
     std::vector<decodeplugin::Detection> dets;
     for (int i = 0; i < output[0]; i++) {
         if (output[15 * i + 1 + 4] <= 0.1) continue;
+        std::cout << "Detection " << i << " passed confidence threshold. Conf: " 
+                 << output[15 * i + 1 + 4] << std::endl;
         decodeplugin::Detection det;
         memcpy(&det, &output[15 * i + 1], sizeof(decodeplugin::Detection));
         dets.push_back(det);
     }
+    
+    std::cout << "After initial filtering: " << dets.size() << " detections" << std::endl;
     std::sort(dets.begin(), dets.end(), cmp);
     for (size_t m = 0; m < dets.size(); ++m) {
         auto& item = dets[m];

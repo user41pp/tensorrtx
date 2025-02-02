@@ -1,5 +1,6 @@
 #include "decode.h"
 #include "stdio.h"
+#include <iostream>
 
 namespace nvinfer1
 {
@@ -108,6 +109,29 @@ namespace nvinfer1
     __device__ float Logist(float data){ return 1./(1. + expf(-data)); };
 
     __global__ void CalDetection(const float *input, float *output, int num_elem, int step, int anchor, int output_elem) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            printf("CalDetection kernel: step=%d, anchor=%d, num_elem=%d\n", step, anchor, num_elem);
+            
+            // Print the first few values of the input tensor
+            printf("First few input values:\n");
+            for (int i = 0; i < 10; i++) {
+                printf("%f ", input[i]);
+            }
+            printf("\n");
+            
+            // Print tensor dimensions
+            int h = decodeplugin::INPUT_H / step;
+            int w = decodeplugin::INPUT_W / step;
+            int total_grid = h * w;
+            printf("Grid dimensions: %dx%d, total_grid=%d\n", h, w, total_grid);
+            
+            // Print classification offset
+            int cls_offset = 2 * 4 * total_grid;
+            printf("Classification offset: %d\n", cls_offset);
+            printf("First few classification values: %f %f %f %f\n", 
+                   input[cls_offset], input[cls_offset+1], 
+                   input[cls_offset+total_grid], input[cls_offset+total_grid+1]);
+        }
 
         int idx = threadIdx.x + blockDim.x * blockIdx.x;
         if (idx >= num_elem) return;
@@ -127,8 +151,27 @@ namespace nvinfer1
         for (int k = 0; k < 2; ++k) {
             float conf1 = cls_reg[idx + k * total_grid * 2];
             float conf2 = cls_reg[idx + k * total_grid * 2 + total_grid];
+            
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+                printf("Raw scores at idx=%d, k=%d: conf1=%f, conf2=%f\n", idx, k, conf1, conf2);
+            }
+            
             conf2 = expf(conf2) / (expf(conf1) + expf(conf2));
+            
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+                printf("After softmax at idx=%d, k=%d: conf2=%f\n", idx, k, conf2);
+            }
+
             if (conf2 <= 0.02) continue;
+
+            if (conf2 > 0.02) {
+                printf("Found detection: conf=%.4f at x=%d,y=%d,k=%d\n", conf2, x, y, k);
+                printf("bbox_reg values: %f %f %f %f\n", 
+                    bbox_reg[idx + k * total_grid * 4],
+                    bbox_reg[idx + k * total_grid * 4 + total_grid],
+                    bbox_reg[idx + k * total_grid * 4 + total_grid * 2],
+                    bbox_reg[idx + k * total_grid * 4 + total_grid * 3]);
+            }
 
             float *res_count = output + bn_idx * output_elem;
             int count = (int)atomicAdd(res_count, 1);
@@ -166,6 +209,25 @@ namespace nvinfer1
 
     void DecodePlugin::forwardGpu(const float *const * inputs, float * output, cudaStream_t stream, int batchSize)
     {
+        std::cout << "forwardGpu called with batchSize: " << batchSize << std::endl;
+        
+        // Print dimensions for each feature level
+        for (int i = 0; i < 3; i++) {
+            int step = 8 * (1 << i);  // 8, 16, 32
+            int h = decodeplugin::INPUT_H / step;
+            int w = decodeplugin::INPUT_W / step;
+            std::cout << "Feature level " << i << " dimensions: " << h << "x" << w << std::endl;
+            
+            // Print more input values
+            float host_data[20];
+            cudaMemcpy(host_data, inputs[i], 20*sizeof(float), cudaMemcpyDeviceToHost);
+            std::cout << "First 20 values: ";
+            for (int j = 0; j < 20; j++) {
+                std::cout << host_data[j] << " ";
+            }
+            std::cout << std::endl;
+        }
+        
         int num_elem = 0;
         int base_step = 8;
         int base_anchor = 16;
@@ -179,14 +241,44 @@ namespace nvinfer1
             cudaMemsetAsync(output + idx * totalCount, 0, sizeof(float), stream);
         }
 
-        for (unsigned int i = 0; i < 3; ++i)
-        {
+        // Verify output initialization
+        float host_output[5];
+        cudaMemcpy(host_output, output, 5*sizeof(float), cudaMemcpyDeviceToHost);
+        std::cout << "First 5 output values after init: ";
+        for (int i = 0; i < 5; i++) {
+            std::cout << host_output[i] << " ";
+        }
+        std::cout << std::endl;
+
+        for (unsigned int i = 0; i < 3; ++i) {
             num_elem = batchSize * decodeplugin::INPUT_H / base_step * decodeplugin::INPUT_W / base_step;
             thread_count = (num_elem < thread_count_) ? num_elem : thread_count_;
+            
+            std::cout << "Launching kernel " << i << " with:" << std::endl;
+            std::cout << "num_elem: " << num_elem << std::endl;
+            std::cout << "thread_count: " << thread_count << std::endl;
+            std::cout << "blocks: " << (num_elem + thread_count - 1) / thread_count << std::endl;
+            
             CalDetection<<< (num_elem + thread_count - 1) / thread_count, thread_count, 0, stream>>>
                 (inputs[i], output, num_elem, base_step, base_anchor, totalCount);
+            
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) {
+                std::cout << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            }
+            
             base_step *= 2;
             base_anchor *= 4;
+        }
+
+        for (int i = 0; i < 3; i++) {
+            std::cout << "Input " << i << " first values: ";
+            float host_data[5];
+            cudaMemcpy(host_data, inputs[i], 5*sizeof(float), cudaMemcpyDeviceToHost);
+            for (int j = 0; j < 5; j++) {
+                std::cout << host_data[j] << " ";
+            }
+            std::cout << std::endl;
         }
     }
 
