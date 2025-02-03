@@ -8,6 +8,7 @@ import random
 import sys
 import threading
 import time
+import datetime
 
 import cv2
 import numpy as np
@@ -67,6 +68,12 @@ def plot_one_box(x, landmark,img, color=None, label=None, line_thickness=None):
             lineType=cv2.LINE_AA,
         )
 
+def create_output_dir():
+    """Create and return path to outputs directory with datetime stamp"""
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join('outputs', f'outputs_{timestamp}')
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
 
 class Retinaface_trt(object):
     """
@@ -117,62 +124,74 @@ class Retinaface_trt(object):
         self.cuda_outputs = cuda_outputs
         self.bindings = bindings
 
-    def infer(self, input_image_path):
-        threading.Thread.__init__(self)
-        # Make self the active context, pushing it on top of the context stack.
+    def infer(self, input_image_path, output_dir):
+        try:
+            threading.Thread.__init__(self)
+            # Make self the active context, pushing it on top of the context stack.
+            self.cfx.push()
+            
+            # Restore
+            stream = self.stream
+            context = self.context
+            engine = self.engine
+            host_inputs = self.host_inputs
+            cuda_inputs = self.cuda_inputs
+            host_outputs = self.host_outputs
+            cuda_outputs = self.cuda_outputs
+            bindings = self.bindings
+            
+            # Do image preprocess
+            input_image, image_raw, origin_h, origin_w = self.preprocess_image(
+                input_image_path
+            )
+            a = time.time()
+            # Copy input image to host buffer
+            np.copyto(host_inputs[0], input_image.ravel())
+            # Transfer input data  to the GPU.
+            cuda.memcpy_htod_async(cuda_inputs[0], host_inputs[0], stream)
+            # Run inference.
+            context.execute_async(bindings=bindings, stream_handle=stream.handle)
+            # Transfer predictions back from the GPU.
+            cuda.memcpy_dtoh_async(host_outputs[0], cuda_outputs[0], stream)
+            # Synchronize the stream
+            stream.synchronize()
+            # Remove any context from the top of the context stack, deactivating it.
+            self.cfx.pop()
+            # Here we use the first row of output in that batch_size = 1
+            output = host_outputs[0]
 
-        self.cfx.push()
-        # Restore
-        stream = self.stream
-        context = self.context
-        engine = self.engine
-        host_inputs = self.host_inputs
-        cuda_inputs = self.cuda_inputs
-        host_outputs = self.host_outputs
-        cuda_outputs = self.cuda_outputs
-        bindings = self.bindings
-        # Do image preprocess
-        input_image, image_raw, origin_h, origin_w = self.preprocess_image(
-            input_image_path
-        )
-        a = time.time()
-        # Copy input image to host buffer
-        np.copyto(host_inputs[0], input_image.ravel())
-        # Transfer input data  to the GPU.
-        cuda.memcpy_htod_async(cuda_inputs[0], host_inputs[0], stream)
-        # Run inference.
-        context.execute_async(bindings=bindings, stream_handle=stream.handle)
-        # Transfer predictions back from the GPU.
-        cuda.memcpy_dtoh_async(host_outputs[0], cuda_outputs[0], stream)
-        # Synchronize the stream
-        stream.synchronize()
-        # Remove any context from the top of the context stack, deactivating it.
-        self.cfx.pop()
-        # Here we use the first row of output in that batch_size = 1
-        output = host_outputs[0]
+            # Do postprocess
+            result_boxes, result_scores, result_landmark = self.post_process(
+                output, origin_h, origin_w
+            )
+            b = time.time()-a
+            print(b)
 
-        # Do postprocess
-        result_boxes, result_scores, result_landmark = self.post_process(
-            output, origin_h, origin_w
-        )
-        b = time.time()-a
-        print(b)
+            # Draw rectangles and labels on the original image
 
-        # Draw rectangles and labels on the original image
+            # Save image
+            for i in range(len(result_boxes)):
+                box = result_boxes[i]
+                landmark = result_landmark[i]
+                plot_one_box(
+                    box,
+                    landmark,
+                    image_raw,
+                    label="{}:{:.2f}".format( 'Face', result_scores[i]))
+            filename = os.path.basename(input_image_path)
+            save_name = os.path.join(output_dir, "output_" + filename)
 
-        # Save image
-        for i in range(len(result_boxes)):
-            box = result_boxes[i]
-            landmark = result_landmark[i]
-            plot_one_box(
-                box,
-                landmark,
-                image_raw,
-                label="{}:{:.2f}".format( 'Face', result_scores[i]))
-        parent, filename = os.path.split(input_image_path)
-        save_name = os.path.join(parent, "output_" + filename)
+            cv2.imwrite(save_name, image_raw)
 
-        cv2.imwrite(save_name, image_raw)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error processing image: {e}")
+            # Make sure to pop the context even if there's an error
+            self.cfx.pop()
+            return
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            self.cfx.pop()
+            return
 
     def destroy(self):
         # Remove any context from the top of the context stack, deactivating it.
@@ -190,7 +209,13 @@ class Retinaface_trt(object):
             h: original height
             w: original width
         """
+        if not os.path.exists(input_image_path):
+            raise FileNotFoundError(f"Image file not found: {input_image_path}")
+        
         image_raw = cv2.imread(input_image_path)
+        if image_raw is None:
+            raise ValueError(f"Failed to load image: {input_image_path}")
+
         h, w, c = image_raw.shape
 
         # Calculate widht and height and paddings
@@ -318,20 +343,72 @@ class myThread(threading.Thread):
     def run(self):
         self.func(*self.args)
 
+def get_image_files(path):
+    """
+    Get list of image files from a path (single image or directory)
+    """
+    image_extensions = ('.jpg', '.jpeg', '.png', '.bmp')
+    
+    if os.path.isfile(path):
+        if path.lower().endswith(image_extensions):
+            return [path]
+        else:
+            return []
+            
+    image_files = []
+    for root, _, files in os.walk(path):
+        for file in files:
+            if file.lower().endswith(image_extensions):
+                image_files.append(os.path.join(root, file))
+    return image_files
+
 if __name__ == "__main__":
-    # load custom plugins,make sure it has been generated
-    PLUGIN_LIBRARY = "build/libdecodeplugin.so"
-    ctypes.CDLL(PLUGIN_LIBRARY)
-    engine_file_path = "build/retina_r50.engine"
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='RetinaFace inference with TensorRT')
+    parser.add_argument('input', help='Path to image file or directory containing images')
+    parser.add_argument('--plugin', default="build/libdecodeplugin.so",
+                      help='Path to TensorRT plugin library (default: build/libdecodeplugin.so)')
+    parser.add_argument('--engine', default="build/retina_r50.engine",
+                      help='Path to TensorRT engine file (default: build/retina_r50.engine)')
+    parser.add_argument('--batch', type=int, default=1,
+                      help='Number of times to process each image (default: 1)')
+    args = parser.parse_args()
 
-    retinaface = Retinaface_trt(engine_file_path)
-    input_image_paths = ["zidane.jpg"]
-    for i in range(10):
-        for input_image_path in input_image_paths:
-            # create a new thread to do inference
-            thread = myThread(retinaface.infer, [input_image_path])
-            thread.start()
-            thread.join()
+    # Load custom plugins
+    if not os.path.exists(args.plugin):
+        raise FileNotFoundError(f"Plugin library not found: {args.plugin}")
+    ctypes.CDLL(args.plugin)
 
-    # destroy the instance
-    retinaface.destroy()
+    # Check engine file exists
+    if not os.path.exists(args.engine):
+        raise FileNotFoundError(f"Engine file not found: {args.engine}")
+
+    # Get list of image files to process
+    image_files = get_image_files(args.input)
+    if not image_files:
+        print(f"No valid image files found in: {args.input}")
+        sys.exit(1)
+
+    print(f"Found {len(image_files)} images to process")
+    
+    # Create output directory with timestamp
+    output_dir = create_output_dir()
+    print(f"Saving outputs to: {output_dir}")
+    
+    # Initialize RetinaFace
+    retinaface = Retinaface_trt(args.engine)
+    
+    try:
+        for i in range(args.batch):
+            for image_path in image_files:
+                print(f"Processing {image_path}...")
+                try:
+                    thread = myThread(retinaface.infer, [image_path, output_dir])
+                    thread.start()
+                    thread.join()
+                except Exception as e:
+                    print(f"Error processing {image_path}: {e}")
+                    continue
+    finally:
+        retinaface.destroy()
