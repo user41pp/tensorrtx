@@ -1,4 +1,4 @@
 #include "verbosity.h"
 
-// Define the global verbosity variable with default value
-VerbosityLevel g_verbosity = INFO; 
+// Define the global verbosity level variable
+VerbosityLevel g_verbosity = SILENT;  // Default to SILENT level
