@@ -20,6 +20,9 @@ RUN apt update && apt-get install -y \
 libopencv-dev \
 && rm -rf /var/lib/apt/lists/*
 
+# Additional Python packages for cv2, numpy, pycuda, torch, and torchvision
+RUN pip install --no-cache-dir numpy pycuda opencv-python-headless torch torchvision
+
 ## a template to build opencv and opencv_contrib from source
 # RUN git clone -b 4.x https://github.com/opencv/opencv_contrib.git \
 # && git clone -b 4.x https://github.com/opencv/opencv.git opencv \
