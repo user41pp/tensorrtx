@@ -124,7 +124,7 @@ class Retinaface_trt(object):
         self.cuda_outputs = cuda_outputs
         self.bindings = bindings
 
-    def infer(self, input_image_path, output_dir):
+    def infer(self, input_image_path, output_dir, visualize=False):
         try:
             threading.Thread.__init__(self)
             # Make self the active context, pushing it on top of the context stack.
@@ -167,31 +167,30 @@ class Retinaface_trt(object):
             b = time.time()-a
             print(b)
 
-            # Draw rectangles and labels on the original image
+            # Draw rectangles and labels and save image only if visualize is True
+            if visualize:
+                for i in range(len(result_boxes)):
+                    box = result_boxes[i]
+                    landmark = result_landmark[i]
+                    plot_one_box(
+                        box,
+                        landmark,
+                        image_raw,
+                        label="{}:{:.2f}".format('Face', result_scores[i]))
+                filename = os.path.basename(input_image_path)
+                save_name = os.path.join(output_dir, "output_" + filename)
+                cv2.imwrite(save_name, image_raw)
 
-            # Save image
-            for i in range(len(result_boxes)):
-                box = result_boxes[i]
-                landmark = result_landmark[i]
-                plot_one_box(
-                    box,
-                    landmark,
-                    image_raw,
-                    label="{}:{:.2f}".format( 'Face', result_scores[i]))
-            filename = os.path.basename(input_image_path)
-            save_name = os.path.join(output_dir, "output_" + filename)
-
-            cv2.imwrite(save_name, image_raw)
+            return result_boxes, result_scores, result_landmark
 
         except (FileNotFoundError, ValueError) as e:
             print(f"Error processing image: {e}")
-            # Make sure to pop the context even if there's an error
             self.cfx.pop()
-            return
+            return None, None, None
         except Exception as e:
             print(f"Unexpected error: {e}")
             self.cfx.pop()
-            return
+            return None, None, None
 
     def destroy(self):
         # Remove any context from the top of the context stack, deactivating it.
@@ -373,6 +372,8 @@ if __name__ == "__main__":
                       help='Path to TensorRT engine file (default: build/retina_r50.engine)')
     parser.add_argument('--batch', type=int, default=1,
                       help='Number of times to process each image (default: 1)')
+    parser.add_argument('--vis', action='store_true',
+                      help='Visualize and save detection results')
     args = parser.parse_args()
 
     # Load custom plugins
@@ -392,23 +393,31 @@ if __name__ == "__main__":
 
     print(f"Found {len(image_files)} images to process")
     
-    # Create output directory with timestamp
-    output_dir = create_output_dir()
-    print(f"Saving outputs to: {output_dir}")
+    # Create output directory only if visualization is enabled
+    output_dir = create_output_dir() if args.vis else None
+    if args.vis:
+        print(f"Saving outputs to: {output_dir}")
     
     # Initialize RetinaFace
     retinaface = Retinaface_trt(args.engine)
     
     try:
+        total_start_time = time.time()
+        
         for i in range(args.batch):
             for image_path in image_files:
                 print(f"Processing {image_path}...")
                 try:
-                    thread = myThread(retinaface.infer, [image_path, output_dir])
+                    thread = myThread(retinaface.infer, [image_path, output_dir, args.vis])
                     thread.start()
                     thread.join()
                 except Exception as e:
                     print(f"Error processing {image_path}: {e}")
                     continue
+        
+        total_duration = time.time() - total_start_time
+        print(f"\nTotal processing time: {total_duration:.2f} seconds")
+        print(f"Average time per image: {total_duration/(len(image_files) * args.batch):.2f} seconds")
+        
     finally:
         retinaface.destroy()
