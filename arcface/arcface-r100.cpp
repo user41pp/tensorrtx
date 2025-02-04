@@ -21,7 +21,7 @@
         }\
     } while (0)
 
-//#define USE_FP16  // comment out this if want to use FP32
+#define USE_FP16  // comment out this if want to use FP32
 #define DEVICE 0  // GPU id
 #define BATCH_SIZE 1  // currently, only support BATCH=1
 
@@ -176,10 +176,11 @@ ILayer* resUnit(INetworkDefinition *network, std::map<std::string, Weights>& wei
 
 // Creat the engine using only the API and not any parser.
 ICudaEngine* createEngine(unsigned int maxBatchSize, IBuilder* builder, IBuilderConfig* config, DataType dt) {
-    INetworkDefinition* network = builder->createNetworkV2(0U);
+    // Create network with explicit batch dimension
+    INetworkDefinition* network = builder->createNetworkV2(1U << static_cast<uint32_t>(NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
 
-    // Create input tensor of shape {3, INPUT_H, INPUT_W} with name INPUT_BLOB_NAME
-    ITensor* data = network->addInput(INPUT_BLOB_NAME, dt, Dims3{3, INPUT_H, INPUT_W});
+    // Create input tensor with explicit batch dimension
+    ITensor* data = network->addInput(INPUT_BLOB_NAME, dt, Dims4{BATCH_SIZE, 3, INPUT_H, INPUT_W});
     assert(data);
 
     std::map<std::string, Weights> weightMap = loadWeights("../arcface-r100.wts");
@@ -298,8 +299,16 @@ void APIToModel(unsigned int maxBatchSize, IHostMemory** modelStream) {
 void doInference(IExecutionContext& context, float* input, float* output, int batchSize) {
     const ICudaEngine& engine = context.getEngine();
 
-    // Pointers to input and output device buffers to pass to engine.
-    // Engine requires exactly IEngine::getNbBindings() number of buffers.
+    // Print input dimensions
+    std::cout << "Input dimensions: " << batchSize << " x 3 x " << INPUT_H << " x " << INPUT_W 
+              << " (batch x channels x height x width)" << std::endl;
+    std::cout << "Input size in bytes: " << batchSize * 3 * INPUT_H * INPUT_W * sizeof(float) << std::endl;
+
+    // Print output dimensions
+    std::cout << "Output dimensions: " << batchSize << " x " << OUTPUT_SIZE 
+              << " (batch x feature_size)" << std::endl;
+    std::cout << "Output size in bytes: " << batchSize * OUTPUT_SIZE * sizeof(float) << std::endl;
+
     assert(engine.getNbBindings() == 2);
     void* buffers[2];
 
