@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.10)
 
 project(arcface)
 
@@ -24,7 +24,11 @@ endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Ofast -Wfatal-errors -D_MWAITXINTRIN_H_INCLUDED")
 
-cuda_add_library(myplugins SHARED ${PROJECT_SOURCE_DIR}/prelu.cu)
+# Set CUDA architecture flags explicitly
+set(CMAKE_CUDA_ARCHITECTURES 86)  # For RTX 3090
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -gencode arch=compute_86,code=sm_86)
+
+cuda_add_library(arcface SHARED ${PROJECT_SOURCE_DIR}/prelu.cu)
 
 find_package(OpenCV)
 include_directories(${OpenCV_INCLUDE_DIRS})
@@ -32,19 +36,19 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 add_executable(arcface-r50 ${PROJECT_SOURCE_DIR}/arcface-r50.cpp)
 target_link_libraries(arcface-r50 nvinfer)
 target_link_libraries(arcface-r50 cudart)
-target_link_libraries(arcface-r50 myplugins)
+target_link_libraries(arcface-r50 arcface)
 target_link_libraries(arcface-r50 ${OpenCV_LIBS})
 
 add_executable(arcface-mobilefacenet ${PROJECT_SOURCE_DIR}/arcface-mobilefacenet.cpp)
 target_link_libraries(arcface-mobilefacenet nvinfer)
 target_link_libraries(arcface-mobilefacenet cudart)
-target_link_libraries(arcface-mobilefacenet myplugins)
+target_link_libraries(arcface-mobilefacenet arcface)
 target_link_libraries(arcface-mobilefacenet ${OpenCV_LIBS})
 
 add_executable(arcface-r100 ${PROJECT_SOURCE_DIR}/arcface-r100.cpp)
 target_link_libraries(arcface-r100 nvinfer)
 target_link_libraries(arcface-r100 cudart)
-target_link_libraries(arcface-r100 myplugins)
+target_link_libraries(arcface-r100 arcface)
 target_link_libraries(arcface-r100 ${OpenCV_LIBS})
 
 add_definitions(-O2 -pthread)
