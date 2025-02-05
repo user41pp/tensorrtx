@@ -81,27 +81,40 @@ class ArcFace_TRT(object):
     """
     def __init__(self, engine_file_path):
         # Create a Context on this device,
+        print("\nInitializing ArcFace_TRT...")
         cuda.init()
         self.cfx = cuda.Device(0).make_context()
-        stream = cuda.Stream()
-        runtime = trt.Runtime(TRT_LOGGER)
+        self._context_pushed = False
+        self._context_cleaned_up = False
+        self._resources_cleaned = False
+        
+        # Create stream first so it's available throughout initialization
+        self.stream = cuda.Stream()
+        print("Created CUDA stream")
+        
+        self.runtime = trt.Runtime(TRT_LOGGER)
+        print("Created TensorRT runtime")
 
         # Deserialize the engine from file
+        print(f"Loading engine from: {engine_file_path}")
         with open(engine_file_path, "rb") as f:
-            engine = runtime.deserialize_cuda_engine(f.read())
+            self.engine = self.runtime.deserialize_cuda_engine(f.read())
+        print("Engine deserialized successfully")
 
-        context = engine.create_execution_context()
+        self.context = self.engine.create_execution_context()
+        print("Created execution context")
 
-        host_inputs = []
-        cuda_inputs = []
-        host_outputs = []
-        cuda_outputs = []
-        bindings = []
+        self.host_inputs = []
+        self.cuda_inputs = []
+        self.host_outputs = []
+        self.cuda_outputs = []
+        self.bindings = []
+        self._allocated_buffers = []  # Track allocated CUDA buffers
 
-        for binding in engine:
+        for binding in self.engine:
             # Get shape and make it compatible with explicit batch
-            shape = engine.get_tensor_shape(binding)
-            if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
+            shape = self.engine.get_tensor_shape(binding)
+            if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
                 self.input_shape = shape
                 self.input_size = trt.volume(shape)
                 print(f"\nTensorRT engine input shape: {shape}")
@@ -114,34 +127,92 @@ class ArcFace_TRT(object):
             
             # Allocate host and device buffers
             host_mem = cuda.pagelocked_empty(
-                self.input_size if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT else self.output_size,
-                trt.nptype(engine.get_tensor_dtype(binding))
+                self.input_size if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT else self.output_size,
+                trt.nptype(self.engine.get_tensor_dtype(binding))
             )
             cuda_mem = cuda.mem_alloc(host_mem.nbytes)
-            bindings.append(int(cuda_mem))
+            self._allocated_buffers.append(cuda_mem)  # Track for cleanup
+            self.bindings.append(int(cuda_mem))
             
-            if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
-                host_inputs.append(host_mem)
-                cuda_inputs.append(cuda_mem)
+            if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
+                self.host_inputs.append(host_mem)
+                self.cuda_inputs.append(cuda_mem)
             else:
-                host_outputs.append(host_mem)
-                cuda_outputs.append(cuda_mem)
+                self.host_outputs.append(host_mem)
+                self.cuda_outputs.append(cuda_mem)
 
-        # Store
-        self.stream = stream
-        self.context = context
-        self.engine = engine
-        self.host_inputs = host_inputs
-        self.cuda_inputs = cuda_inputs
-        self.host_outputs = host_outputs
-        self.cuda_outputs = cuda_outputs
-        self.bindings = bindings
+        print("Initialization completed successfully")
+
+    def cleanup_cuda_resources(self):
+        """Clean up CUDA resources explicitly"""
+        print("\nStarting CUDA resource cleanup...")
+        if hasattr(self, '_resources_cleaned') and self._resources_cleaned:
+            print("Resources already cleaned up")
+            return
+
+        try:
+            # First synchronize the stream
+            if hasattr(self, 'stream'):
+                print("Synchronizing CUDA stream...")
+                self.stream.synchronize()
+                print("Stream synchronized")
+
+            # Destroy TensorRT objects first
+            if hasattr(self, 'context'):
+                delattr(self, 'context')
+
+            if hasattr(self, 'engine'):
+                delattr(self, 'engine')
+
+            # Free CUDA memory allocations
+            if hasattr(self, '_allocated_buffers'):
+                print(f"Freeing {len(self._allocated_buffers)} CUDA buffers...")
+                for i, buf in enumerate(self._allocated_buffers):
+                    try:
+                        buf.free()
+                        print(f"Freed buffer {i}")
+                    except Exception as e:
+                        print(f"Error freeing buffer {i}: {str(e)}")
+                self._allocated_buffers = []
+
+            # Clear references to CUDA memory
+            if hasattr(self, 'host_inputs'):
+                self.host_inputs = []
+            if hasattr(self, 'host_outputs'):
+                self.host_outputs = []
+            if hasattr(self, 'cuda_inputs'):
+                self.cuda_inputs = []
+            if hasattr(self, 'cuda_outputs'):
+                self.cuda_outputs = []
+            if hasattr(self, 'bindings'):
+                self.bindings = []
+
+            # Clear stream reference
+            if hasattr(self, 'stream'):
+                print("Clearing CUDA stream reference...")
+                delattr(self, 'stream')
+                print("Stream reference cleared")
+
+            # Clear runtime reference
+            if hasattr(self, 'runtime'):
+                print("Clearing TensorRT runtime reference...")
+                delattr(self, 'runtime')
+                print("Runtime reference cleared")
+
+            self._resources_cleaned = True
+            print("CUDA resource cleanup completed")
+
+        except Exception as e:
+            print(f"Error during resource cleanup: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def infer(self, image_path, is_first=True):
         try:
             print("\nStarting inference...")
-            self.cfx.push()
-            self._context_pushed = True
+            if not self._context_pushed:
+                self.cfx.push()
+                self._context_pushed = True
             print("CUDA context pushed")
             
             # Process input image
@@ -237,8 +308,9 @@ class ArcFace_TRT(object):
         finally:
             print("\nCleaning up CUDA context in infer...")
             try:
-                if hasattr(self, '_context_pushed'):
+                if self._context_pushed and not self._context_cleaned_up:
                     self.cfx.pop()
+                    self._context_pushed = False
                     print("CUDA context popped in infer")
                 else:
                     print("No context to pop in infer")
@@ -249,27 +321,42 @@ class ArcFace_TRT(object):
         """Ensure context is removed even if an error occurs"""
         print("\nStarting ArcFace_TRT cleanup...")
         try:
-            if hasattr(self, 'cfx') and not hasattr(self, '_context_cleaned_up'):
-                print("Cleaning up CUDA context in destructor...")
-                try:
-                    self.cfx.pop()
-                    print("Context popped successfully")
-                except Exception as e:
-                    print(f"Error popping context: {str(e)}")
+            if hasattr(self, 'cfx') and not self._context_cleaned_up:
+                print("Starting cleanup sequence...")
                 
+                # First clean up all CUDA resources while context is still valid
+                self.cleanup_cuda_resources()
+                
+                # Then handle the CUDA context
+                if self._context_pushed:
+                    print("Popping CUDA context...")
+                    try:
+                        self.cfx.pop()
+                        self._context_pushed = False
+                        print("Context popped successfully")
+                    except Exception as e:
+                        print(f"Error popping context: {str(e)}")
+                
+                print("Detaching CUDA context...")
                 try:
                     self.cfx.detach()
                     print("Context detached successfully")
                 except Exception as e:
                     print(f"Error detaching context: {str(e)}")
+                finally:
+                    # Clear the reference to the context
+                    delattr(self, 'cfx')
                 
                 self._context_cleaned_up = True
+                print("Cleanup sequence completed")
             else:
                 print("No CUDA context to clean up or already cleaned")
         except Exception as e:
             print(f"Error during cleanup: {str(e)}")
             import traceback
             traceback.print_exc()
+        finally:
+            print("Cleanup finished")
 
 def compute_similarity(feature1_mat, feature2_mat):
     """
@@ -342,14 +429,7 @@ def main():
         
     except Exception as e:
         print(f"Error during inference: {e}")
-    finally:
-        if arcface:
-            arcface.__del__()
-        # Clean up CUDA context
-        try:
-            cuda.Context.pop()
-        except:
-            pass
+    print("ArcFace_TRT inference completed")
 
 if __name__ == "__main__":
     main()
