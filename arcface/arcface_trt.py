@@ -8,6 +8,8 @@ import numpy as np
 import pycuda.autoinit
 import pycuda.driver as cuda
 import tensorrt as trt
+import enum
+from typing import Optional
 
 # Constants
 INPUT_H = 112  # Height of input images
@@ -19,59 +21,82 @@ DEVICE = 0  # GPU id
 # TensorRT logger singleton
 TRT_LOGGER = trt.Logger(trt.Logger.INFO)
 
+# Verbosity levels
+class VerbosityLevel(enum.IntEnum):
+    SILENT = 0  # No output
+    ERROR = 1   # Only error messages
+    INFO = 2    # Important high-level information
+    DEBUG = 3   # Detailed debugging information
+    TRACE = 4   # Very detailed tracing information
+
+# Global verbosity setting
+VERBOSITY = VerbosityLevel.INFO
+
+def log(level: VerbosityLevel, message: str, error: Optional[Exception] = None) -> None:
+    """
+    Log a message if the current verbosity level is high enough.
+    
+    Args:
+        level: The verbosity level of this message
+        message: The message to log
+        error: Optional exception to include in output
+    """
+    if level <= VERBOSITY:
+        if error:
+            print(f"{level.name}: {message}\nError: {str(error)}", file=sys.stderr if level == VerbosityLevel.ERROR else sys.stdout)
+        else:
+            print(f"{level.name}: {message}", file=sys.stderr if level == VerbosityLevel.ERROR else sys.stdout)
+
 def normalize_image(img):
     """
     Normalize image for ArcFace model to match C++ preprocessing exactly
     """
-    print(f"\nInput image shape before resize: {img.shape}")
-    print(f"Input image data type: {img.dtype}")
-    print(f"Input image range: min={img.min()}, max={img.max()}")
+    log(VerbosityLevel.DEBUG, f"Input image shape before resize: {img.shape}")
+    log(VerbosityLevel.DEBUG, f"Input image data type: {img.dtype}")
+    log(VerbosityLevel.DEBUG, f"Input image range: min={img.min()}, max={img.max()}")
     
     # Resize image to expected dimensions
-    #img = cv2.resize(img, (INPUT_W, INPUT_H))
     img = img[0:INPUT_H, 0:INPUT_W]
-    print(f"After resize: {img.shape}")
-    print(f"After resize range: min={img.min()}, max={img.max()}")
+    log(VerbosityLevel.DEBUG, f"After resize: {img.shape}")
+    log(VerbosityLevel.DEBUG, f"After resize range: min={img.min()}, max={img.max()}")
     
     # Convert to float32 and reshape to match C++ memory layout
     img_flat = img.reshape(-1, 3)
-    print(f"After flatten: {img_flat.shape}")
+    log(VerbosityLevel.DEBUG, f"After flatten: {img_flat.shape}")
     
     # Sample some pixels for debugging
-    print("\nSample pixels before normalization:")
+    log(VerbosityLevel.TRACE, "Sample pixels before normalization:")
     for i in range(0, INPUT_H * INPUT_W, (INPUT_H * INPUT_W) // 4):
-        print(f"Pixel {i}: BGR={img_flat[i]}, RGB={img_flat[i][::-1]}")
+        log(VerbosityLevel.TRACE, f"Pixel {i}: BGR={img_flat[i]}, RGB={img_flat[i][::-1]}")
         
     # Print exact values for first few pixels to match against C++
-    print("\nDetailed first few pixels (BGR):")
+    log(VerbosityLevel.TRACE, "Detailed first few pixels (BGR):")
     for i in range(5):
         b, g, r = img_flat[i]
-        print(f"Pixel {i}:")
-        print(f"  B: {b} -> {(float(b) - 127.5) * 0.0078125:.6f}")
-        print(f"  G: {g} -> {(float(g) - 127.5) * 0.0078125:.6f}")
-        print(f"  R: {r} -> {(float(r) - 127.5) * 0.0078125:.6f}")
+        log(VerbosityLevel.TRACE, f"Pixel {i}:")
+        log(VerbosityLevel.TRACE, f"  B: {b} -> {(float(b) - 127.5) * 0.0078125:.6f}")
+        log(VerbosityLevel.TRACE, f"  G: {g} -> {(float(g) - 127.5) * 0.0078125:.6f}")
+        log(VerbosityLevel.TRACE, f"  R: {r} -> {(float(r) - 127.5) * 0.0078125:.6f}")
     
     # Allocate output array in CHW format
     out = np.empty((3, INPUT_H, INPUT_W), dtype=np.float32)
-    print(f"\nOutput buffer shape: {out.shape}")
+    log(VerbosityLevel.DEBUG, f"Output buffer shape: {out.shape}")
     
     # Process each pixel to match C++ exactly
     for i in range(INPUT_H * INPUT_W):
-        # Note: img_flat[i] is in BGR order from OpenCV
-        # Map to same channel order as C++: R,G,B
         out[0, i // INPUT_W, i % INPUT_W] = (float(img_flat[i][2]) - 127.5) * 0.0078125  # R
         out[1, i // INPUT_W, i % INPUT_W] = (float(img_flat[i][1]) - 127.5) * 0.0078125  # G
         out[2, i // INPUT_W, i % INPUT_W] = (float(img_flat[i][0]) - 127.5) * 0.0078125  # B
     
     # Add batch dimension
     out = np.expand_dims(out, axis=0)
-    print(f"Final shape with batch dimension: {out.shape}")
-    print(f"Data range: min={out.min():.6f}, max={out.max():.6f}")
+    log(VerbosityLevel.DEBUG, f"Final shape with batch dimension: {out.shape}")
+    log(VerbosityLevel.DEBUG, f"Data range: min={out.min():.6f}, max={out.max():.6f}")
     
     # Sample some normalized pixels for debugging
-    print("\nSample normalized pixels (first 4 per channel):")
+    log(VerbosityLevel.TRACE, "Sample normalized pixels (first 4 per channel):")
     for c, name in enumerate(['R', 'G', 'B']):
-        print(f"Channel {name}: {out[0,c,0,:4]}")
+        log(VerbosityLevel.TRACE, f"Channel {name}: {out[0,c,0,:4]}")
     
     return np.ascontiguousarray(out)
 
@@ -80,58 +105,53 @@ class ArcFace_TRT(object):
     description: A ArcFace class that warps TensorRT ops, preprocess and postprocess ops.
     """
     def __init__(self, engine_file_path):
-        # Create a Context on this device,
-        print("\nInitializing ArcFace_TRT...")
+        log(VerbosityLevel.INFO, "Initializing ArcFace_TRT...")
         cuda.init()
         self.cfx = cuda.Device(0).make_context()
         self._context_pushed = False
         self._context_cleaned_up = False
         self._resources_cleaned = False
         
-        # Create stream first so it's available throughout initialization
         self.stream = cuda.Stream()
-        print("Created CUDA stream")
+        log(VerbosityLevel.DEBUG, "Created CUDA stream")
         
         self.runtime = trt.Runtime(TRT_LOGGER)
-        print("Created TensorRT runtime")
+        log(VerbosityLevel.DEBUG, "Created TensorRT runtime")
 
-        # Deserialize the engine from file
-        print(f"Loading engine from: {engine_file_path}")
+        log(VerbosityLevel.INFO, f"Loading engine from: {engine_file_path}")
         with open(engine_file_path, "rb") as f:
             self.engine = self.runtime.deserialize_cuda_engine(f.read())
-        print("Engine deserialized successfully")
+        log(VerbosityLevel.INFO, "Engine deserialized successfully")
 
         self.context = self.engine.create_execution_context()
-        print("Created execution context")
+        log(VerbosityLevel.DEBUG, "Created execution context")
 
         self.host_inputs = []
         self.cuda_inputs = []
         self.host_outputs = []
         self.cuda_outputs = []
         self.bindings = []
-        self._allocated_buffers = []  # Track allocated CUDA buffers
+        self._allocated_buffers = []
 
         for binding in self.engine:
-            # Get shape and make it compatible with explicit batch
             shape = self.engine.get_tensor_shape(binding)
             if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
                 self.input_shape = shape
                 self.input_size = trt.volume(shape)
-                print(f"\nTensorRT engine input shape: {shape}")
-                print(f"Input size in elements: {self.input_size}")
+                log(VerbosityLevel.DEBUG, f"TensorRT engine input shape: {shape}")
+                log(VerbosityLevel.DEBUG, f"Input size in elements: {self.input_size}")
             else:
                 self.output_shape = shape
                 self.output_size = trt.volume(shape)
-                print(f"TensorRT engine output shape: {shape}")
-                print(f"Output size in elements: {self.output_size}")
+                log(VerbosityLevel.DEBUG, f"TensorRT engine output shape: {shape}")
+                log(VerbosityLevel.DEBUG, f"Output size in elements: {self.output_size}")
             
-            # Allocate host and device buffers
             host_mem = cuda.pagelocked_empty(
                 self.input_size if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT else self.output_size,
                 trt.nptype(self.engine.get_tensor_dtype(binding))
             )
             cuda_mem = cuda.mem_alloc(host_mem.nbytes)
-            self._allocated_buffers.append(cuda_mem)  # Track for cleanup
+            self._allocated_buffers.append(cuda_mem)
             self.bindings.append(int(cuda_mem))
             
             if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
@@ -141,41 +161,36 @@ class ArcFace_TRT(object):
                 self.host_outputs.append(host_mem)
                 self.cuda_outputs.append(cuda_mem)
 
-        print("Initialization completed successfully")
+        log(VerbosityLevel.INFO, "Initialization completed successfully")
 
     def cleanup_cuda_resources(self):
-        """Clean up CUDA resources explicitly"""
-        print("\nStarting CUDA resource cleanup...")
+        log(VerbosityLevel.DEBUG, "Starting CUDA resource cleanup...")
         if hasattr(self, '_resources_cleaned') and self._resources_cleaned:
-            print("Resources already cleaned up")
+            log(VerbosityLevel.DEBUG, "Resources already cleaned up")
             return
 
         try:
-            # First synchronize the stream
             if hasattr(self, 'stream'):
-                print("Synchronizing CUDA stream...")
+                log(VerbosityLevel.DEBUG, "Synchronizing CUDA stream...")
                 self.stream.synchronize()
-                print("Stream synchronized")
+                log(VerbosityLevel.DEBUG, "Stream synchronized")
 
-            # Destroy TensorRT objects first
             if hasattr(self, 'context'):
                 delattr(self, 'context')
 
             if hasattr(self, 'engine'):
                 delattr(self, 'engine')
 
-            # Free CUDA memory allocations
             if hasattr(self, '_allocated_buffers'):
-                print(f"Freeing {len(self._allocated_buffers)} CUDA buffers...")
+                log(VerbosityLevel.DEBUG, f"Freeing {len(self._allocated_buffers)} CUDA buffers...")
                 for i, buf in enumerate(self._allocated_buffers):
                     try:
                         buf.free()
-                        print(f"Freed buffer {i}")
+                        log(VerbosityLevel.TRACE, f"Freed buffer {i}")
                     except Exception as e:
-                        print(f"Error freeing buffer {i}: {str(e)}")
+                        log(VerbosityLevel.ERROR, f"Error freeing buffer {i}", e)
                 self._allocated_buffers = []
 
-            # Clear references to CUDA memory
             if hasattr(self, 'host_inputs'):
                 self.host_inputs = []
             if hasattr(self, 'host_outputs'):
@@ -187,202 +202,158 @@ class ArcFace_TRT(object):
             if hasattr(self, 'bindings'):
                 self.bindings = []
 
-            # Clear stream reference
             if hasattr(self, 'stream'):
-                print("Clearing CUDA stream reference...")
+                log(VerbosityLevel.DEBUG, "Clearing CUDA stream reference...")
                 delattr(self, 'stream')
-                print("Stream reference cleared")
+                log(VerbosityLevel.DEBUG, "Stream reference cleared")
 
-            # Clear runtime reference
             if hasattr(self, 'runtime'):
-                print("Clearing TensorRT runtime reference...")
+                log(VerbosityLevel.DEBUG, "Clearing TensorRT runtime reference...")
                 delattr(self, 'runtime')
-                print("Runtime reference cleared")
+                log(VerbosityLevel.DEBUG, "Runtime reference cleared")
 
             self._resources_cleaned = True
-            print("CUDA resource cleanup completed")
+            log(VerbosityLevel.INFO, "CUDA resource cleanup completed")
 
         except Exception as e:
-            print(f"Error during resource cleanup: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            log(VerbosityLevel.ERROR, "Error during resource cleanup", e)
 
     def infer(self, image_path, is_first=True):
         try:
-            print("\nStarting inference...")
+            log(VerbosityLevel.INFO, "Starting inference...")
             if not self._context_pushed:
                 self.cfx.push()
                 self._context_pushed = True
-            print("CUDA context pushed")
+            log(VerbosityLevel.DEBUG, "CUDA context pushed")
             
-            # Process input image
-            print(f"Loading image: {image_path}")
+            log(VerbosityLevel.INFO, f"Loading image: {image_path}")
             image = cv2.imread(image_path)
             if image is None:
                 raise ValueError(f"Failed to load image: {image_path}")
             
             input_image = normalize_image(image)
-            print("Image normalized successfully")
+            log(VerbosityLevel.DEBUG, "Image normalized successfully")
             
-            # Verify input shape matches expected shape
             if input_image.size != self.input_size:
                 raise ValueError(f"Input size mismatch. Expected {self.input_size}, got {input_image.size}\n"
                                f"Input shape: {input_image.shape}, Expected shape: {self.input_shape}")
             
-            print("\nCopying data to host buffer...")
-            # Copy input image to host buffer
+            log(VerbosityLevel.DEBUG, "Copying data to host buffer...")
             np.copyto(self.host_inputs[0], input_image.ravel())
-            print("Data copied to host buffer")
+            log(VerbosityLevel.DEBUG, "Data copied to host buffer")
             
-            print("Transferring data to GPU...")
-            # Transfer input data to the GPU
+            log(VerbosityLevel.DEBUG, "Transferring data to GPU...")
             cuda.memcpy_htod_async(self.cuda_inputs[0], self.host_inputs[0], self.stream)
-            print("Data transferred to GPU")
+            log(VerbosityLevel.DEBUG, "Data transferred to GPU")
             
-            # Run inference
-            print("\nPreparing for inference...")
-            # Set input tensor shape
+            log(VerbosityLevel.DEBUG, "Preparing for inference...")
             for binding_idx, binding in enumerate(self.engine):
                 if self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
-                    print(f"Setting input shape for binding {binding_idx}: {self.input_shape}")
+                    log(VerbosityLevel.DEBUG, f"Setting input shape for binding {binding_idx}: {self.input_shape}")
                     self.context.set_input_shape(binding, self.input_shape)
             
-            print("Running inference...")
-            # Execute inference
+            log(VerbosityLevel.INFO, "Running inference...")
             self.context.execute_async_v2(bindings=self.bindings,
                                         stream_handle=self.stream.handle)
-            print("Inference completed")
+            log(VerbosityLevel.INFO, "Inference completed")
             
-            print("\nTransferring results back to host...")
-            # Transfer predictions back from the GPU
+            log(VerbosityLevel.DEBUG, "Transferring results back to host...")
             cuda.memcpy_dtoh_async(self.host_outputs[0], self.cuda_outputs[0], self.stream)
-            print("Results transferred")
+            log(VerbosityLevel.DEBUG, "Results transferred")
             
-            print("Synchronizing CUDA stream...")
-            # Synchronize the stream
+            log(VerbosityLevel.DEBUG, "Synchronizing CUDA stream...")
             self.stream.synchronize()
-            print("Stream synchronized")
+            log(VerbosityLevel.DEBUG, "Stream synchronized")
             
-            # Get output and normalize
             output = self.host_outputs[0]
-            print(f"\nRaw output shape: {output.shape}")
-            print(f"Raw output range: min={output.min():.6f}, max={output.max():.6f}")
-            print("\nFirst 10 raw output values:")
-            print(output[:10])
+            log(VerbosityLevel.DEBUG, f"Raw output shape: {output.shape}")
+            log(VerbosityLevel.DEBUG, f"Raw output range: min={output.min():.6f}, max={output.max():.6f}")
+            log(VerbosityLevel.TRACE, f"First 10 raw output values:\n{output[:10]}")
             
-            # Reshape to match C++ exactly - flatten all dimensions to get 512 elements
-            feature = output.reshape(-1)[:OUTPUT_SIZE]  # Take first 512 elements
-            print(f"\nReshaped feature vector shape: {feature.shape}")
-            print(f"Feature vector range: min={feature.min():.6f}, max={feature.max():.6f}")
+            feature = output.reshape(-1)[:OUTPUT_SIZE]
+            log(VerbosityLevel.DEBUG, f"Reshaped feature vector shape: {feature.shape}")
+            log(VerbosityLevel.DEBUG, f"Feature vector range: min={feature.min():.6f}, max={feature.max():.6f}")
             
-            # Sample some feature values
-            print("\nFirst 10 feature values before normalization:")
-            print(feature[:10])
+            log(VerbosityLevel.TRACE, f"First 10 feature values before normalization:\n{feature[:10]}")
             
-            # Convert to OpenCV Mat format for exact normalization
-            # Match C++ matrix shapes exactly:
-            # First vector: (512, 1) column vector
-            # Second vector: (1, 512) row vector
             if is_first:
                 feature_mat = feature.reshape(512, 1).astype(np.float32)
             else:
                 feature_mat = feature.reshape(1, 512).astype(np.float32)
                 
-            print(f"\nFeature matrix shape before normalization: {feature_mat.shape}")
-            # Use cv2.NORM_L2 to match C++ normalization
+            log(VerbosityLevel.DEBUG, f"Feature matrix shape before normalization: {feature_mat.shape}")
             feature_norm = cv2.normalize(feature_mat, None, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L2)
-            print(f"Feature matrix shape after normalization: {feature_norm.shape}")
+            log(VerbosityLevel.DEBUG, f"Feature matrix shape after normalization: {feature_norm.shape}")
             
-            # Print normalized values for debugging
-            print(f"\nNormalized feature matrix range: min={feature_norm.min():.6f}, max={feature_norm.max():.6f}")
-            print("First 10 normalized values:")
-            print(feature_norm.flatten()[:10])
+            log(VerbosityLevel.DEBUG, f"Normalized feature matrix range: min={feature_norm.min():.6f}, max={feature_norm.max():.6f}")
+            log(VerbosityLevel.TRACE, f"First 10 normalized values:\n{feature_norm.flatten()[:10]}")
             
             return feature_norm
             
         except Exception as e:
-            print(f"Error during inference: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            log(VerbosityLevel.ERROR, "Error during inference", e)
             raise
         finally:
-            print("\nCleaning up CUDA context in infer...")
+            log(VerbosityLevel.DEBUG, "Cleaning up CUDA context in infer...")
             try:
                 if self._context_pushed and not self._context_cleaned_up:
                     self.cfx.pop()
                     self._context_pushed = False
-                    print("CUDA context popped in infer")
+                    log(VerbosityLevel.DEBUG, "CUDA context popped in infer")
                 else:
-                    print("No context to pop in infer")
+                    log(VerbosityLevel.DEBUG, "No context to pop in infer")
             except Exception as e:
-                print(f"Error during CUDA cleanup in infer: {str(e)}")
+                log(VerbosityLevel.ERROR, "Error during CUDA cleanup in infer", e)
 
     def __del__(self):
-        """Ensure context is removed even if an error occurs"""
-        print("\nStarting ArcFace_TRT cleanup...")
+        log(VerbosityLevel.DEBUG, "Starting ArcFace_TRT cleanup...")
         try:
             if hasattr(self, 'cfx') and not self._context_cleaned_up:
-                print("Starting cleanup sequence...")
+                log(VerbosityLevel.DEBUG, "Starting cleanup sequence...")
                 
-                # First clean up all CUDA resources while context is still valid
                 self.cleanup_cuda_resources()
                 
-                # Then handle the CUDA context
                 if self._context_pushed:
-                    print("Popping CUDA context...")
+                    log(VerbosityLevel.DEBUG, "Popping CUDA context...")
                     try:
                         self.cfx.pop()
                         self._context_pushed = False
-                        print("Context popped successfully")
+                        log(VerbosityLevel.DEBUG, "Context popped successfully")
                     except Exception as e:
-                        print(f"Error popping context: {str(e)}")
+                        log(VerbosityLevel.ERROR, "Error popping context", e)
                 
-                print("Detaching CUDA context...")
+                log(VerbosityLevel.DEBUG, "Detaching CUDA context...")
                 try:
                     self.cfx.detach()
-                    print("Context detached successfully")
+                    log(VerbosityLevel.DEBUG, "Context detached successfully")
                 except Exception as e:
-                    print(f"Error detaching context: {str(e)}")
+                    log(VerbosityLevel.ERROR, "Error detaching context", e)
                 finally:
-                    # Clear the reference to the context
                     delattr(self, 'cfx')
                 
                 self._context_cleaned_up = True
-                print("Cleanup sequence completed")
+                log(VerbosityLevel.INFO, "Cleanup sequence completed")
             else:
-                print("No CUDA context to clean up or already cleaned")
+                log(VerbosityLevel.DEBUG, "No CUDA context to clean up or already cleaned")
         except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            log(VerbosityLevel.ERROR, "Error during cleanup", e)
         finally:
-            print("Cleanup finished")
+            log(VerbosityLevel.DEBUG, "Cleanup finished")
 
 def compute_similarity(feature1_mat, feature2_mat):
-    """
-    Compute cosine similarity between two feature vectors using matrix multiplication
-    exactly like the C++ code
-    """
-    # Print detailed debugging info
-    print("\nComputing similarity between feature matrices:")
-    print(f"Feature 1 matrix shape: {feature1_mat.shape}")
-    print(f"Feature 2 matrix shape: {feature2_mat.shape}")
+    log(VerbosityLevel.DEBUG, "Computing similarity between feature matrices:")
+    log(VerbosityLevel.DEBUG, f"Feature 1 matrix shape: {feature1_mat.shape}")
+    log(VerbosityLevel.DEBUG, f"Feature 2 matrix shape: {feature2_mat.shape}")
     
-    # Print first few values of each matrix
-    print("\nFirst 5 values of feature1:")
-    print(feature1_mat.flatten()[:5])
-    print("\nFirst 5 values of feature2:")
-    print(feature2_mat.flatten()[:5])
+    log(VerbosityLevel.TRACE, f"First 5 values of feature1:\n{feature1_mat.flatten()[:5]}")
+    log(VerbosityLevel.TRACE, f"First 5 values of feature2:\n{feature2_mat.flatten()[:5]}")
     
-    # Verify normalization
-    print(f"\nFeature 1 L2 norm: {np.linalg.norm(feature1_mat):.6f}")
-    print(f"Feature 2 L2 norm: {np.linalg.norm(feature2_mat):.6f}")
+    log(VerbosityLevel.DEBUG, f"Feature 1 L2 norm: {np.linalg.norm(feature1_mat):.6f}")
+    log(VerbosityLevel.DEBUG, f"Feature 2 L2 norm: {np.linalg.norm(feature2_mat):.6f}")
     
-    # Compute similarity using matrix multiplication
-    # In C++: cv::Mat res = out_norm1 * out_norm;
     result = np.matmul(feature2_mat, feature1_mat)
-    similarity = result.item()  # Get scalar value
-    print(f"\nMatrix multiplication result: {similarity:.6f}")
+    similarity = result.item()
+    log(VerbosityLevel.INFO, f"Matrix multiplication result: {similarity:.6f}")
     
     return similarity
 
@@ -394,42 +365,54 @@ def main():
                       help='Path to TensorRT plugin library (default: build/libarcface.so)')
     parser.add_argument('--engine', default="build/arcface-r100.engine",
                       help='Path to TensorRT engine file (default: build/arcface-r100.engine)')
+    parser.add_argument('--verbosity', type=int, choices=range(5), default=2,
+                      help='Verbosity level (0=SILENT, 1=ERROR, 2=INFO, 3=DEBUG, 4=TRACE)')
     args = parser.parse_args()
+
+    # Set global verbosity level
+    global VERBOSITY
+    VERBOSITY = VerbosityLevel(args.verbosity)
 
     # Load custom plugins
     if not os.path.exists(args.plugin):
-        raise FileNotFoundError(f"Plugin library not found: {args.plugin}")
+        log(VerbosityLevel.ERROR, f"Plugin library not found: {args.plugin}")
+        sys.exit(1)
     ctypes.CDLL(args.plugin)
 
     # Check engine file exists
     if not os.path.exists(args.engine):
-        raise FileNotFoundError(f"Engine file not found: {args.engine}")
+        log(VerbosityLevel.ERROR, f"Engine file not found: {args.engine}")
+        sys.exit(1)
 
     # Check input files exist
     if not os.path.exists(args.reference):
-        raise FileNotFoundError(f"Reference image not found: {args.reference}")
+        log(VerbosityLevel.ERROR, f"Reference image not found: {args.reference}")
+        sys.exit(1)
     if not os.path.exists(args.input):
-        raise FileNotFoundError(f"Input image not found: {args.input}")
+        log(VerbosityLevel.ERROR, f"Input image not found: {args.input}")
+        sys.exit(1)
 
-    # Initialize ArcFace
     arcface = None
     try:
         arcface = ArcFace_TRT(args.engine)
 
-        # Extract features from reference and input images
-        print(f"Processing reference image: {args.reference}")
-        ref_feature = arcface.infer(args.reference, is_first=True)  # Column vector
+        log(VerbosityLevel.INFO, f"Processing reference image: {args.reference}")
+        ref_feature = arcface.infer(args.reference, is_first=True)
         
-        print(f"Processing input image: {args.input}")
-        input_feature = arcface.infer(args.input, is_first=False)  # Row vector
+        log(VerbosityLevel.INFO, f"Processing input image: {args.input}")
+        input_feature = arcface.infer(args.input, is_first=False)
 
-        # Compute similarity score using OpenCV matrices
         similarity = compute_similarity(ref_feature, input_feature)
-        print(f"\nSimilarity score: {similarity:.4f}")
+        log(VerbosityLevel.INFO, f"Similarity score: {similarity:.4f}")
         
     except Exception as e:
-        print(f"Error during inference: {e}")
-    print("ArcFace_TRT inference completed")
+        log(VerbosityLevel.ERROR, "Error during inference", e)
+        sys.exit(1)
+    finally:
+        if arcface:
+            arcface.cleanup_cuda_resources()
+
+    log(VerbosityLevel.INFO, "ArcFace_TRT inference completed")
 
 if __name__ == "__main__":
     main()
